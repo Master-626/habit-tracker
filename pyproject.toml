@@ -17,3 +17,19 @@ habit = "habit_tracker.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/Master-626/habit-tracker"
+
+[project.optional-dependencies]
+dev = ["pytest>=7,<9", "build>=1,<2", "ruff>=0.8,<0.15"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/habit_tracker"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+target-version = "py38"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
