@@ -34,13 +34,18 @@ def validate_name(name):
     return name
 
 
-def validate_day(value):
+def parse_day(value):
     try:
         day = date.fromisoformat(value)
     except (TypeError, ValueError):
         raise HabitError("Date must be a real date in YYYY-MM-DD format.") from None
     if day.isoformat() != value:
         raise HabitError("Date must use YYYY-MM-DD format.")
+    return day
+
+
+def validate_day(value):
+    day = parse_day(value)
     if day > date.today():
         raise HabitError("Cannot check in for a future date.")
     return day
@@ -111,8 +116,11 @@ def database(path, create=False):
         for (name,) in connection.execute("SELECT name FROM habits"):
             if validate_name(name) != name:
                 raise HabitError("Invalid stored habit name; no data was changed.")
+        # Format only. A stored date can fall after today when the clock or
+        # timezone moves backward; applying the new-check-in rule here would
+        # lock the whole file.
         for (day,) in connection.execute("SELECT day FROM checkins"):
-            validate_day(day)
+            parse_day(day)
         yield connection
         connection.commit()
     except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
@@ -157,6 +165,21 @@ def check_in(path, name, day):
     return name, added
 
 
+def remove_habit(path, name):
+    name = validate_name(name)
+    with database(path) as connection:
+        if (
+            connection is None
+            or not connection.execute(
+                "SELECT 1 FROM habits WHERE name = ?", (name,)
+            ).fetchone()
+        ):
+            raise HabitError("Unknown habit: {}.".format(name))
+        connection.execute("DELETE FROM checkins WHERE name = ?", (name,))
+        connection.execute("DELETE FROM habits WHERE name = ?", (name,))
+    return name
+
+
 def streaks(days, today):
     completed = sorted(set(date.fromisoformat(day) for day in days))
     longest = run = 0
@@ -169,10 +192,23 @@ def streaks(days, today):
         )
         longest = max(longest, run)
         previous = day
-    current = (
-        run if completed and completed[-1] in (today, today - timedelta(days=1)) else 0
-    )
-    return current, longest, today in completed
+    # Current streak ends today, or yesterday when today is still open.
+    # A later stored date must not replace that anchor.
+    present = set(completed)
+    if today in present:
+        anchor = today
+    elif today - timedelta(days=1) in present:
+        anchor = today - timedelta(days=1)
+    else:
+        anchor = None
+    current = 0
+    if anchor is not None:
+        day = anchor
+        current = 1
+        while day - timedelta(days=1) in present:
+            current += 1
+            day -= timedelta(days=1)
+    return current, longest, today in present
 
 
 def list_habits(path):
