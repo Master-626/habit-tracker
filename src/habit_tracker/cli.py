@@ -3,8 +3,10 @@
 import functools
 
 import click
+from rich.cells import cell_len
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 
 from habit_tracker import __version__
 from habit_tracker.storage import (
@@ -13,7 +15,12 @@ from habit_tracker.storage import (
     check_in,
     default_database,
     list_habits,
+    remove_habit,
 )
+
+
+def day_count(count):
+    return "1 day" if count == 1 else "{} days".format(count)
 
 
 def handle_errors(function):
@@ -80,18 +87,30 @@ def list_command(database):
         click.echo("No habits yet. Add one with: habit add NAME")
         return
     table = Table(title="Habits")
-    for title in ("Habit", "Streak", "Longest", "Done Today"):
-        table.add_column(title)
-    from rich.text import Text
-
+    table.add_column("Habit", no_wrap=True, overflow="ignore")
+    for title in ("Streak", "Longest", "Done Today"):
+        table.add_column(title, no_wrap=True)
     for name, current, longest, done in habits:
         table.add_row(
             Text(name),
-            "{} days".format(current),
-            "{} days".format(longest),
+            day_count(current),
+            day_count(longest),
             "Yes" if done else "No",
         )
-    Console().print(table)
+    # Size the table to the names. Passing only width is ignored when TERM is
+    # dumb, which is what squeezes long habits down to an ellipsis.
+    width = max(80, max(cell_len(name) for name, _, _, _ in habits) + 64)
+    Console(width=width, height=len(habits) + 16).print(table)
+
+
+@main.command()
+@click.argument("name")
+@click.pass_obj
+@handle_errors
+def remove(database, name):
+    """Remove a habit and its check-ins."""
+    name = remove_habit(database, name)
+    click.echo("Removed habit: {}".format(name))
 
 
 if __name__ == "__main__":

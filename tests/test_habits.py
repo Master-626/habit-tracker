@@ -1,4 +1,5 @@
 import os
+import random
 import sqlite3
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from habit_tracker.storage import (
     check_in,
     default_database,
     list_habits,
+    remove_habit,
     streaks,
 )
 
@@ -126,6 +128,11 @@ def test_future_date(db):
         ([-4, -3, -2, 0], (1, 3, True)),
         ([-3, -2, -1], (3, 3, False)),
         ([-2, -1, 0], (3, 3, True)),
+        # A later date must not clear the run ending today or yesterday.
+        ([-1, 0, 1], (2, 3, True)),
+        ([0, 2], (1, 1, True)),
+        ([-1, 2], (1, 1, False)),
+        ([1, 2], (0, 2, False)),
     ],
 )
 def test_streaks(offsets, expected):
@@ -142,7 +149,9 @@ def test_backdated_leap_day(db):
     assert list_habits(db)[0][2] == 1
 
 
-@pytest.mark.parametrize("command", [("list",), ("add", "Read"), ("checkin", "Read")])
+@pytest.mark.parametrize(
+    "command", [("list",), ("add", "Read"), ("checkin", "Read"), ("remove", "Read")]
+)
 def test_corrupt_file_preserved(db, command):
     db.write_bytes(b"not sqlite\x00data")
     before = db.read_bytes()
@@ -268,6 +277,128 @@ def test_orphan_with_declared_foreign_key_preserved(db):
     before = db.read_bytes()
     assert invoke(db, "list").exit_code != 0
     assert db.read_bytes() == before
+
+
+def expected_streaks(days, today):
+    present = {date.fromisoformat(day) for day in days}
+    longest = 0
+    for day in present:
+        if day - timedelta(days=1) not in present:
+            run = 0
+            cursor = day
+            while cursor in present:
+                run += 1
+                cursor += timedelta(days=1)
+            longest = max(longest, run)
+    if today in present:
+        anchor = today
+    elif today - timedelta(days=1) in present:
+        anchor = today - timedelta(days=1)
+    else:
+        anchor = None
+    current = 0
+    if anchor is not None:
+        cursor = anchor
+        while cursor in present:
+            current += 1
+            cursor -= timedelta(days=1)
+    return current, longest, today in present
+
+
+def test_streaks_match_calendar_walk():
+    today = date(2024, 3, 1)
+    rng = random.Random(0)
+    for _ in range(300):
+        offsets = rng.sample(range(-30, 8), rng.randint(0, 10))
+        days = [(today + timedelta(days=offset)).isoformat() for offset in offsets]
+        if days:
+            days = days + days[:2]
+        rng.shuffle(days)
+        assert streaks(days, today) == expected_streaks(days, today)
+
+
+def test_later_stored_date_stays_readable_and_keeps_current_streak(db):
+    add_habit(db, "Read")
+    today = date.today()
+    check_in(db, "Read", (today - timedelta(days=1)).isoformat())
+    check_in(db, "Read", today.isoformat())
+    later = (today + timedelta(days=1)).isoformat()
+    with sqlite3.connect(str(db)) as connection:
+        connection.execute(
+            "INSERT INTO checkins(name, day) VALUES (?, ?)", ("Read", later)
+        )
+    assert list_habits(db) == [("Read", 2, 3, True)]
+    listed = invoke(db, "list")
+    assert listed.exit_code == 0
+    assert "Read" in listed.output
+    assert "2 days" in listed.output
+    assert "future" not in listed.output.lower()
+    assert invoke(db, "add", "Walk").exit_code == 0
+    assert invoke(db, "checkin", "Walk").exit_code == 0
+    assert {name for name, _, _, _ in list_habits(db)} == {"Read", "Walk"}
+
+
+def test_full_habit_name_is_listed(db):
+    wide = "Focus " + ("深" * 80)
+    plain = "N" * 200
+    add_habit(db, wide)
+    add_habit(db, plain)
+    result = invoke(db, "list")
+    assert result.exit_code == 0
+    assert wide in result.output
+    assert plain in result.output
+    assert "Done Today" in result.output
+    assert "…" not in result.output
+
+
+def test_streak_labels_use_singular_day(db):
+    add_habit(db, "Read")
+    check_in(db, "Read", (date.today() - timedelta(days=1)).isoformat())
+    one = invoke(db, "list")
+    assert one.exit_code == 0
+    assert "1 day" in one.output
+    assert "1 days" not in one.output
+    check_in(db, "Read", date.today().isoformat())
+    two = invoke(db, "list")
+    assert two.exit_code == 0
+    assert "2 days" in two.output
+
+
+def test_remove_deletes_one_habit_and_its_checkins(db):
+    add_habit(db, "Read")
+    add_habit(db, "Walk")
+    check_in(db, "Read", date.today().isoformat())
+    result = invoke(db, "remove", "  Read  ")
+    assert result.exit_code == 0
+    assert result.output == "Removed habit: Read\n"
+    assert list_habits(db) == [("Walk", 0, 0, False)]
+    with sqlite3.connect(str(db)) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM checkins").fetchone() == (0,)
+        assert connection.execute("SELECT name FROM habits").fetchall() == [("Walk",)]
+    assert remove_habit(db, "Walk") == "Walk"
+    assert list_habits(db) == []
+    assert db.exists()
+
+
+def test_remove_unknown_does_not_create_database(db):
+    result = invoke(db, "remove", "Missing")
+    assert result.exit_code != 0
+    assert "Unknown habit" in result.output
+    assert "Removed habit" not in result.output
+    assert not db.exists()
+
+
+def test_remove_unknown_or_invalid_keeps_rows(db):
+    add_habit(db, "Read")
+    check_in(db, "Read", date.today().isoformat())
+    missing = invoke(db, "remove", "Missing")
+    invalid = invoke(db, "remove", "bad\nname")
+    assert missing.exit_code != 0 and invalid.exit_code != 0
+    assert "Removed habit" not in missing.output
+    assert "Removed habit" not in invalid.output
+    assert list_habits(db) == [("Read", 1, 1, True)]
+    with sqlite3.connect(str(db)) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM checkins").fetchone() == (1,)
 
 
 def test_unexpected_unique_constraint_is_not_repeat_success(db):

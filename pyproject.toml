@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "habit-tracker"
 version = "0.1.0"
-description = "A habit tracking CLI with streaks and reports."
+description = "Local SQLite CLI for daily habits, check-ins, and streaks."
 readme = "README.md"
 requires-python = ">=3.8"
 license = { text = "MIT" }
